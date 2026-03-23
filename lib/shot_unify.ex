@@ -1,6 +1,7 @@
 defmodule ShotUnify do
   @moduledoc """
-  TODO
+  Implements (syntactic) higher-order pre-unification for term pairs based on
+  projection and imitation.
   """
   alias ShotDs.Data.Type
   alias ShotDs.Data.{Term, Substitution}

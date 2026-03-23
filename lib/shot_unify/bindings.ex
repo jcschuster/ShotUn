@@ -1,4 +1,5 @@
 defmodule ShotUnify.Bindings do
+  @moduledoc false
   alias ShotDs.Data.{Type, Declaration, Substitution}
   alias ShotDs.Stt.TermFactory, as: TF
 
