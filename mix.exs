@@ -33,7 +33,7 @@ defmodule ShotUnify.MixProject do
       # Code analyzer and type checker
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
       # Documentation generation
-      {:ex_doc, "~> 0.21", only: :dev, runtime: false}
+      {:ex_doc, "~> 0.40.1", only: :dev, runtime: false}
     ]
   end
 
@@ -41,7 +41,8 @@ defmodule ShotUnify.MixProject do
     [
       main: "readme",
       extras: [
-        "README.md"
+        "README.md",
+        "examples/demo.livemd"
       ],
       source_url: @source_url,
       source_ref: "v#{@version}",
