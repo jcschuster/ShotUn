@@ -293,11 +293,8 @@ defmodule ShotUnify do
         bv.name == name and bv.type == type
       end)
 
-    cond do
-      exact_index != nil ->
-        exact_index
-
-      true ->
+    case exact_index do
+      nil ->
         matching_by_type =
           bvars
           |> Enum.with_index()
@@ -307,6 +304,9 @@ defmodule ShotUnify do
           [{_bv, idx}] -> idx
           _ -> max_num - name
         end
+
+      _ ->
+        exact_index
     end
   end
 end

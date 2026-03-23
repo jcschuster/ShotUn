@@ -262,7 +262,7 @@ defmodule ShotUnifyTest do
 
     solutions = ShotUnify.unify({t1, t2}) |> Enum.to_list()
 
-    assert length(solutions) > 0, "Should find at least one solution"
+    assert not Enum.empty?(solutions), "Should find at least one solution"
 
     Enum.each(solutions, fn sol ->
       assert length(sol.substitutions) == 1,
@@ -285,7 +285,7 @@ defmodule ShotUnifyTest do
 
     solutions = ShotUnify.unify({t1, t2}) |> Enum.to_list()
 
-    assert length(solutions) > 0
+    assert not Enum.empty(solutions)
 
     valid_projection_found =
       Enum.any?(solutions, fn sol ->

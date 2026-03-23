@@ -10,101 +10,41 @@ defmodule ShotUnify.Bindings do
   @spec generic_binding(Declaration.free_var_t(), Declaration.t(), [:imitation | :projection]) ::
           [Substitution.t()]
   def generic_binding(left_head, right_head, binding_types) do
-    left_type = left_head.type
-    left_inputs = left_type.args
+    left_args = left_head.type.args
 
-    left_arity = length(left_type.args)
+    x_vars = Enum.map(left_args, &Declaration.fresh_var(&1))
 
-    x_vars =
-      if left_arity == 0 do
-        []
-      else
-        0..(left_arity - 1)
-        |> Enum.map(fn n ->
-          var_type = Enum.at(left_inputs, n)
-          Declaration.new_free_var("UNIF_X_#{n}", var_type)
-        end)
-      end
+    x_term_ids = Enum.map(x_vars, &TF.make_term/1)
 
-    x_vars_terms = Enum.map(x_vars, &TF.make_term/1)
-
-    vars_to_use =
-      case {:imitation in binding_types, :projection in binding_types} do
-        {true, true} -> [right_head | x_vars]
-        {true, false} -> [right_head]
-        {false, true} -> x_vars
-        _ -> []
-      end
+    heads_to_use =
+      build_head_candidates(right_head, x_vars, binding_types)
       |> Enum.filter(fn var ->
         var.type.goal == right_head.type.goal
       end)
 
-    bindings_right_side =
-      Enum.map(vars_to_use, fn var ->
-        generic_binding_inner(var, left_inputs, x_vars, x_vars_terms)
-      end)
-
-    results =
-      Enum.map(bindings_right_side, fn binding ->
-        Substitution.new(left_head, binding)
-      end)
-
-    results
+    Enum.map(heads_to_use, fn var ->
+      binding = build_binding_term(var, left_args, x_vars, x_term_ids)
+      Substitution.new(left_head, binding)
+    end)
   end
 
-  defp generic_binding_inner(inner_var, left_inputs, x_vars, x_vars_terms) do
-    to_use_type = inner_var.type
-    to_use_inputs = to_use_type.args
-    to_use_arity = length(to_use_type.args)
+  defp build_head_candidates(right_head, x_vars, binding_types) do
+    imitation = if :imitation in binding_types, do: [right_head], else: []
+    projection = if :projection in binding_types, do: x_vars, else: []
+    imitation ++ projection
+  end
 
+  defp build_binding_term(head, left_args, x_vars, x_term_ids) do
     h_vars =
-      if to_use_arity == 0 do
-        []
-      else
-        0..(to_use_arity - 1)
-        |> Enum.map(fn n ->
-          h_type = %Type{
-            goal: Enum.at(to_use_inputs, n).goal,
-            args: left_inputs ++ Enum.at(to_use_inputs, n).args
-          }
-
-          inner_var_name =
-            if is_reference(inner_var.name) do
-              inspect(inner_var.name)
-            else
-              Kernel.to_string(inner_var.name)
-            end
-
-          TF.make_free_var_term("$UNIF_H_#{inner_var_name}_#{n}", h_type)
-        end)
-      end
-
-    # Apply x_vars to all h_vars
-    applied_h_vars = apply_list_to_list(h_vars, x_vars_terms)
-
-    # Apply applied_h_vars to inner_var
-    final_stack = apply_list(TF.make_term(inner_var), applied_h_vars)
-
-    # Add Abstractions
-    final_binding =
-      Enum.reduce(Enum.reverse(x_vars), final_stack, fn x, acc ->
-        TF.make_abstr_term(acc, x)
+      Enum.map(head.type.args, fn arg_type ->
+        h_type = Type.new(arg_type.goal, left_args ++ arg_type.args)
+        TF.make_fresh_var_term(h_type)
       end)
 
-    final_binding
-  end
+    applied_h_ids = Enum.map(h_vars, &TF.fold_apply(&1, x_term_ids))
 
-  defp apply_list_to_list(start_vars, to_apply) do
-    if Enum.empty?(to_apply) do
-      start_vars
-    else
-      Enum.map(start_vars, fn h ->
-        apply_list(h, to_apply)
-      end)
-    end
-  end
+    matrix_id = TF.fold_apply(TF.make_term(head), applied_h_ids)
 
-  defp apply_list(start_var, to_apply) do
-    Enum.reduce(to_apply, start_var, fn x, acc -> TF.make_appl_term(acc, x) end)
+    List.foldr(x_vars, matrix_id, &TF.make_abstr_term(&2, &1))
   end
 end

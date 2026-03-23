@@ -211,11 +211,8 @@ defmodule ShotUnify.BindingsTest do
         bv.name == bound_var.name and bv.type == bound_var.type
       end)
 
-    cond do
-      exact_index != nil ->
-        exact_index
-
-      true ->
+    case exact_index do
+      nil ->
         matching_by_type =
           bvars
           |> Enum.with_index()
@@ -225,6 +222,9 @@ defmodule ShotUnify.BindingsTest do
           [{_bv, idx}] -> idx
           _ -> term.max_num - bound_var.name
         end
+
+      _ ->
+        exact_index
     end
   end
 

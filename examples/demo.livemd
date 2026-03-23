@@ -56,6 +56,8 @@ unify({x_times_5, num(30)}) |> Enum.map(&Kernel.to_string/1) |> IO.puts
 
 The algorithm finds a solution by substituting $X$ by the Church encoding of $6$.
 
+Note that the unification algorithm returns a [Stream](<https://hexdocs.pm/elixir/Stream.html>) which can be used like any other enumerable. Solutions are computed lazily.
+
 ## Example: X ∙ 10 =? 1000
 
 ```elixir
