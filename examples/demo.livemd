@@ -2,7 +2,7 @@
 
 ```elixir
 Mix.install([
-  {:shot_ds, git: "https://github.com/jcschuster/ShotDs"},
+  {:shot_ds, "~> 0.2.3"},
   {:shot_unify, path: Path.join(__DIR__, "..")}
 ])
 ```
@@ -55,16 +55,6 @@ unify({x_times_5, num(30)}) |> Enum.map(&Kernel.to_string/1) |> IO.puts
 ```
 
 The algorithm finds a solution by substituting $X$ by the Church encoding of $6$.
-
-```elixir
-unify({x_times_5, num(30)})
-|> Enum.to_list()
-|> hd()
-|> then(& &1.substitutions)
-|> hd()
-|> then(&TF.get_term(&1.term_id))
-|> IO.inspect
-```
 
 ## Example: X ∙ 10 =? 1000
 

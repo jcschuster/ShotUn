@@ -19,7 +19,10 @@ defmodule ShotUnify.Bindings do
         []
       else
         0..(left_arity - 1)
-        |> Enum.map(fn n -> Declaration.fresh_var(Enum.at(left_inputs, n)) end)
+        |> Enum.map(fn n ->
+          var_type = Enum.at(left_inputs, n)
+          Declaration.new_free_var("UNIF_X_#{n}", var_type)
+        end)
       end
 
     x_vars_terms = Enum.map(x_vars, &TF.make_term/1)
@@ -64,7 +67,14 @@ defmodule ShotUnify.Bindings do
             args: left_inputs ++ Enum.at(to_use_inputs, n).args
           }
 
-          TF.make_term(Declaration.fresh_var(h_type))
+          inner_var_name =
+            if is_reference(inner_var.name) do
+              inspect(inner_var.name)
+            else
+              Kernel.to_string(inner_var.name)
+            end
+
+          TF.make_free_var_term("$UNIF_H_#{inner_var_name}_#{n}", h_type)
         end)
       end
 
