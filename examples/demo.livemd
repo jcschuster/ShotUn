@@ -1,0 +1,169 @@
+# Demo of the ShotUnify Package
+
+```elixir
+Mix.install([
+  {:shot_ds, git: "https://github.com/jcschuster/ShotDs"},
+  {:shot_unify, path: Path.join(__DIR__, "..")}
+])
+```
+
+## Setup
+
+__ShotDs__ defines various data structures for HOL
+
+```elixir
+import ShotDs.Hol.Dsl
+import ShotDs.Hol.Definitions
+import ShotDs.Stt.Numerals
+import ShotDs.Util.Formatter
+alias ShotDs.Data.Type
+alias ShotDs.Stt.TermFactory, as: TF
+```
+
+```elixir
+import ShotUnify
+```
+
+## Church Numerals
+
+In simple type theory, church numerals are defined as lambda terms accepting a _successor function_ $s_{\iota\to\iota}$ and a _starting point_ $z_\iota$ which return the $n$-fold application of $s$ to $z$. E.g., the numeral for $0$ is $\lambda s z. z$, for $1$ $\lambda s z. s z$, for $2$ $\lambda s z. s (s z)$ and so on.
+
+Based on this encoding, we can define some basic operations on natural numbers as follows:
+
+$$\mathrm{succ}~n \coloneqq \lambda s~z.~s~(n~s~z)$$
+(apply the successor function to $n$)
+
+$$\mathrm{plus}~m~n \coloneqq \lambda s~z.~m~s~(n~s~z)$$
+(apply the successor function $m$ times to $n$)
+
+$$\mathrm{mult}~m~n \coloneqq \lambda s~z.~m~(n~s)~z$$
+(apply $(\mathrm{plus}~n)$ $m$ times)
+
+Note that more complex functions like exponentiation or difference are not expressible without polymorphic types.
+
+```elixir
+for n <- 0..10, do: "#{n} := #{format(num(n), true)}"
+|> IO.puts
+```
+
+## Example: X ∙ 5 =? 30
+
+```elixir
+x_times_5 = mult(num_var("X"), num(5))
+
+unify({x_times_5, num(30)}) |> Enum.map(&Kernel.to_string/1) |> IO.puts
+```
+
+The algorithm finds a solution by substituting $X$ by the Church encoding of $6$.
+
+```elixir
+unify({x_times_5, num(30)})
+|> Enum.to_list()
+|> hd()
+|> then(& &1.substitutions)
+|> hd()
+|> then(&TF.get_term(&1.term_id))
+|> IO.inspect
+```
+
+## Example: X ∙ 10 =? 1000
+
+```elixir
+x_times_10 = mult(num_var("X"), num(10))
+
+unify({x_times_10, num(1000)}, 1000) |> Enum.map(&Kernel.to_string/1) |> IO.puts
+```
+
+The algorithm finds a solution by substituting $X$ by the Church encoding of $100$.
+
+## Example: X ∙ Y =? 4
+
+```elixir
+x_times_y = mult(num_var("X"), num_var("Y"))
+
+unify({x_times_y, num(4)})
+|> Enum.map(&Kernel.to_string/1) |> Enum.join("\n") |> IO.puts
+```
+
+The algorithm finds three solutions to the problem:
+
+* substituting $Y$ by the Church encoding of $4$ and $X$ by the encoding of $1$
+* substituting $Y$ and $X$ by the Church encoding of $2$
+* substituting $Y$ by the Church encoding of $1$ and $X$ by the encoding of $4$
+
+## Example: X a a =? f a a
+
+```elixir
+x = TF.make_free_var_term("X", type_iii())
+f = TF.make_const_term("f", type_iii())
+a = TF.make_const_term("a", type_i())
+
+unify({app(x, [a, a]), app(f, [a, a])})
+|> Enum.map(&Kernel.to_string/1) |> Enum.join("\n") |> IO.puts
+```
+
+The algorithm finds nine total solutions which correspond to all combinations of projections and imitations:
+
+* $\lambda\lambda.~f~a~a~/~X$
+* $\lambda\lambda.~f~a~2~/~X$
+* $\lambda\lambda.~f~a~1~/~X$
+* $\lambda\lambda.~f~2~a~/~X$
+* $\lambda\lambda.~f~2~2~/~X$
+* $\lambda\lambda.~f~2~1~/~X$
+* $\lambda\lambda.~f~1~a~/~X$
+* $\lambda\lambda.~f~1~2~/~X$
+* $\lambda\lambda.~f~1~1~/~X$
+
+## Example: X (f a) =? f (X a)
+
+```elixir
+x = TF.make_free_var_term("X", type_ii())
+f = TF.make_const_term("f", type_ii())
+a = TF.make_const_term("a", type_i())
+
+unify({app(x, app(f, a)), app(f, app(x, a))}, _depth=5)
+|> Enum.map(&Kernel.to_string/1) |> Enum.join("\n") |> IO.puts
+```
+
+The algorithm finds four solutions to the problem at the given depth of `5`. Other solutions can be found when increasing this depth limit. We see that the solutions for this problem follow the pattern of substituting $X$ by the $n$-fold composition of $f$ ($n \in [0, 4]$ for depth `5`).
+
+## Example: System of Equations
+
+**(1)** $(x\cdot y) + z = 21$
+
+**(2)** $x + y + z = 10$
+
+**(3)** $(x \cdot z) + y = 9$
+
+```elixir
+[x, y, z] = for n <- ["X", "Y", "Z"], do: num_var(n)
+
+eqs = [
+  {plus(mult(x, y), z), num(21)},
+  {plus(plus(x, y), z), num(10)},
+  {plus(mult(x, z), y), num(9)}
+]
+
+unify(eqs, 50)
+|> Enum.map(&Kernel.to_string/1) |> Enum.join("\n") |> IO.puts
+```
+
+The algorithm finds two solutions for the given problem with depth `50`:
+
+* substituting $Z$ by the Church encoding of $1$, $Y$ by the encoding of $5$ and $X$ by the encoding of $4$
+* substituting $Z$ by the Church encoding of $1$, $Y$ by the encoding of $4$ and $X$ by the encoding of $5$
+
+Note that in this case, increasing the depth limit does not yield more solutions even though some unification branches are incomplete.
+
+## Example: X =? Y c
+
+```elixir
+x = TF.make_free_var_term("X", type_i())
+y = TF.make_free_var_term("Z", type_ii())
+c = TF.make_const_term("c", type_i())
+
+unify({x, app(y, c)})
+|> Enum.map(&Kernel.to_string/1) |> IO.puts
+```
+
+$X \overset{?}{=} Y~c$ is an example for the _flex-flex_ case. For these cases, often infinite solutions exist. To ensure semi-decidability, unification is deferred and a list of _flex-flex_ pairs is returned as future constraints.
