@@ -2,7 +2,6 @@
 
 ```elixir
 Mix.install([
-  {:shot_ds, "~> 0.2.3"},
   {:shot_unify, path: Path.join(__DIR__, "..")}
 ])
 ```
