@@ -41,7 +41,7 @@ $$\mathrm{mult}~m~n \coloneqq \lambda s~z.~m~(n~s)~z$$
 Note that more complex functions like exponentiation or difference are not expressible without polymorphic types.
 
 ```elixir
-for n <- 0..10, do: "#{n} := #{format(num(n), true)}"
+for n <- 0..10, do: "#{n} := #{format!(num(n))}"
 |> IO.puts
 ```
 

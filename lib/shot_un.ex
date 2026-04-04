@@ -1,14 +1,13 @@
-defmodule ShotUnify do
+defmodule ShotUn do
   @moduledoc """
   Implements (syntactic) higher-order pre-unification for term pairs based on
   projection and imitation.
   """
-  alias ShotDs.Data.Type
-  alias ShotDs.Data.{Term, Substitution}
+  alias ShotDs.Data.{Type, Term, Substitution}
   alias ShotDs.Stt.TermFactory, as: TF
   alias ShotDs.Stt.Semantics
-  alias ShotUnify.UnifSolution
-  alias ShotUnify.Bindings
+  alias ShotUn.UnifSolution
+  alias ShotUn.Bindings
 
   @typep term_pair :: {Term.term_id(), Term.term_id()}
   @typep search_state :: %{
@@ -37,14 +36,11 @@ defmodule ShotUnify do
         TF.start_scratchpad()
 
         initial_scope =
-          Enum.reduce(term_pairs, MapSet.new(), fn {l_id, r_id}, acc ->
-            l_fvars = TF.get_term(l_id).fvars |> MapSet.new()
-            r_fvars = TF.get_term(r_id).fvars |> MapSet.new()
-
-            acc
-            |> MapSet.union(l_fvars)
-            |> MapSet.union(r_fvars)
-          end)
+          for {l_id, r_id} <- term_pairs,
+              id <- [l_id, r_id],
+              fvar <- TF.get_term!(id).fvars,
+              into: MapSet.new(),
+              do: fvar
 
         initial_state = %{pairs: term_pairs, substs: [], flex: [], depth: depth}
 
@@ -76,13 +72,13 @@ defmodule ShotUnify do
 
   defp clean_solution(%{substitutions: substs, flex_pairs: flex}, initial_scope) do
     normalized_substs =
-      substs
-      |> Enum.filter(&MapSet.member?(initial_scope, &1.fvar))
-      |> Enum.map(&%{&1 | term_id: Semantics.subst(substs, &1.term_id)})
+      for subst <- substs, MapSet.member?(initial_scope, subst.fvar) do
+        %{subst | term_id: Semantics.subst!(substs, subst.term_id)}
+      end
 
     normalized_flex =
       Enum.map(flex, fn {l_id, r_id} ->
-        {Semantics.subst(substs, l_id), Semantics.subst(substs, r_id)}
+        {Semantics.subst!(substs, l_id), Semantics.subst!(substs, r_id)}
       end)
 
     %UnifSolution{substitutions: normalized_substs, flex_pairs: normalized_flex}
@@ -91,12 +87,12 @@ defmodule ShotUnify do
   defp commit_solution(%UnifSolution{substitutions: substs, flex_pairs: flex}) do
     committed_substs =
       Enum.map(substs, fn subst ->
-        %{subst | term_id: TF.commit_to_global(subst.term_id)}
+        %{subst | term_id: TF.commit_to_global!(subst.term_id)}
       end)
 
     committed_flex =
       Enum.map(flex, fn {l_id, r_id} ->
-        {TF.commit_to_global(l_id), TF.commit_to_global(r_id)}
+        {TF.commit_to_global!(l_id), TF.commit_to_global!(r_id)}
       end)
 
     %UnifSolution{substitutions: committed_substs, flex_pairs: committed_flex}
@@ -136,8 +132,8 @@ defmodule ShotUnify do
     if left_id == right_id do
       {:next, %{state | pairs: rest}}
     else
-      left = TF.get_term(left_id)
-      right = TF.get_term(right_id)
+      left = TF.get_term!(left_id)
+      right = TF.get_term!(right_id)
 
       evaluate_pair(left, right, state, rest)
     end
@@ -202,14 +198,14 @@ defmodule ShotUnify do
 
   # Case: flex-rigid
   defp evaluate_pair(%Term{head: %{kind: :fv}}, %Term{head: %{kind: :co}}, state, rest),
-    do: do_bindings([:imitation, :projection, :prim_subst], state, rest)
+    do: do_bindings([:imitation, :projection], state, rest)
 
   # Case: rigid-flex
   defp evaluate_pair(%Term{head: %{kind: :co}}, %Term{head: %{kind: :fv}}, state, rest) do
     [{l_id, r_id} | _] = state.pairs
 
     do_bindings(
-      [:imitation, :projection, :prim_subst],
+      [:imitation, :projection],
       %{state | pairs: [{r_id, l_id} | rest]},
       rest
     )
@@ -233,20 +229,20 @@ defmodule ShotUnify do
   ##############################################################################
 
   defp apply_substitution(new_subst, state, rest_pairs) do
-    updated_substs = Semantics.add_subst(state.substs, new_subst)
+    updated_substs = Semantics.add_subst!(state.substs, new_subst)
 
     updated_pairs =
       Enum.map(rest_pairs, fn {l_id, r_id} ->
-        {Semantics.subst(new_subst, l_id), Semantics.subst(new_subst, r_id)}
+        {Semantics.subst!(new_subst, l_id), Semantics.subst!(new_subst, r_id)}
       end)
 
     {remaining_flex, migrated_pairs} =
       Enum.reduce(state.flex, {[], []}, fn {l_id, r_id}, {flex_acc, pairs_acc} ->
-        new_l = Semantics.subst(new_subst, l_id)
-        new_r = Semantics.subst(new_subst, r_id)
+        new_l = Semantics.subst!(new_subst, l_id)
+        new_r = Semantics.subst!(new_subst, r_id)
 
-        l_head_kind = TF.get_term(new_l).head.kind
-        r_head_kind = TF.get_term(new_r).head.kind
+        l_head_kind = TF.get_term!(new_l).head.kind
+        r_head_kind = TF.get_term!(new_r).head.kind
 
         if l_head_kind == :fv and r_head_kind == :fv do
           {[{new_l, new_r} | flex_acc], pairs_acc}
@@ -287,7 +283,7 @@ defmodule ShotUnify do
   defp wrap_in_bvars(term_id, []), do: term_id
 
   defp wrap_in_bvars(term_id, new_bvars) do
-    %Term{type: original_type} = term = TF.get_term(term_id)
+    %Term{type: original_type} = term = TF.get_term!(term_id)
 
     combined_bvars = new_bvars ++ term.bvars
 
@@ -306,22 +302,13 @@ defmodule ShotUnify do
   defp do_bindings(binding_types, state, rest_pairs) do
     [{flex_id, rigid_id} | _] = state.pairs
 
-    flex_head = TF.get_term(flex_id).head
-    rigid_head = TF.get_term(rigid_id).head
+    flex_head = TF.get_term!(flex_id).head
+    rigid_head = TF.get_term!(rigid_id).head
 
-    standard_substs = Bindings.generic_binding(flex_head, rigid_head, binding_types)
-
-    prim_substs =
-      if :prim_subst in binding_types do
-        Bindings.prim_subst_bindings(flex_head, rigid_head)
-      else
-        []
-      end
-
-    all_substitutions = standard_substs ++ prim_substs
+    substs = Bindings.generic_binding(flex_head, rigid_head, binding_types)
 
     new_branches =
-      Enum.map(all_substitutions, fn subst ->
+      Enum.map(substs, fn subst ->
         state
         |> then(&apply_substitution(subst, &1, [{flex_id, rigid_id} | rest_pairs]))
         |> Map.update!(:depth, &(&1 - 1))
@@ -343,20 +330,18 @@ defmodule ShotUnify do
         bv.name == name and bv.type == type
       end)
 
-    case exact_index do
-      nil ->
-        matching_by_type =
-          bvars
-          |> Enum.with_index()
-          |> Enum.filter(fn {bv, _idx} -> bv.type == type end)
+    if exact_index do
+      exact_index
+    else
+      matching_by_type =
+        bvars
+        |> Enum.with_index()
+        |> Enum.filter(fn {bv, _idx} -> bv.type == type end)
 
-        case matching_by_type do
-          [{_bv, idx}] -> idx
-          _ -> max_num - name
-        end
-
-      _ ->
-        exact_index
+      case matching_by_type do
+        [{_bv, idx}] -> idx
+        _ -> max_num - name
+      end
     end
   end
 end

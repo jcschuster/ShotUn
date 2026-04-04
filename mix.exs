@@ -1,12 +1,12 @@
-defmodule ShotUnify.MixProject do
+defmodule ShotUn.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/jcschuster/ShotUnify"
+  @source_url "https://github.com/jcschuster/ShotUn"
 
   def project do
     [
-      app: :shot_unify,
+      app: :shot_un,
       version: @version,
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
@@ -27,7 +27,7 @@ defmodule ShotUnify.MixProject do
   defp deps do
     [
       # Data structures and semantics for HOL objects
-      {:shot_ds, "~> 0.5"},
+      {:shot_ds, "~> 1.0"},
       # Code analyzer, duplication checker and security analyzer
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       # Code analyzer and type checker
