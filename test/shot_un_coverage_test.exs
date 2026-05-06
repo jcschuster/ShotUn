@@ -91,9 +91,7 @@ defmodule ShotUnCoverageTest do
         max_num: 0
       })
 
-    assert_raise RuntimeError, ~r/ArgumentError: can only decompose terms/, fn ->
-      Enum.to_list(ShotUn.unify({t1, t2}, 3))
-    end
+    assert Enum.empty?(ShotUn.unify({t1, t2}, 3))
   end
 
   test "tuple and list input forms behave the same" do

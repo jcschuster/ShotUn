@@ -153,8 +153,10 @@ defmodule ShotUn do
          state,
          rest
        ) do
-    new_pairs = decompose(left, right)
-    {:next, %{state | pairs: new_pairs ++ rest}}
+    case decompose(left, right) do
+      {:ok, new_pairs} -> {:next, %{state | pairs: new_pairs ++ rest}}
+      :error -> :fail
+    end
   end
 
   # Case: rigid-rigid (bound variables)
@@ -165,8 +167,10 @@ defmodule ShotUn do
          rest
        ) do
     if same_bound_slot?(left, left_head, right, right_head) do
-      new_pairs = decompose(left, right)
-      {:next, %{state | pairs: new_pairs ++ rest}}
+      case decompose(left, right) do
+        {:ok, new_pairs} -> {:next, %{state | pairs: new_pairs ++ rest}}
+        :error -> :fail
+      end
     else
       :fail
     end
@@ -271,13 +275,12 @@ defmodule ShotUn do
 
   defp decompose(%Term{bvars: l_bvars, args: l_args}, %Term{bvars: r_bvars, args: r_args}) do
     if length(l_args) != length(r_args) do
-      raise "ArgumentError: can only decompose terms with the same amount of arguments."
+      :error
+    else
+      l_wrapped = Enum.map(l_args, &wrap_in_bvars(&1, l_bvars))
+      r_wrapped = Enum.map(r_args, &wrap_in_bvars(&1, r_bvars))
+      {:ok, Enum.zip(l_wrapped, r_wrapped)}
     end
-
-    l_wrapped = Enum.map(l_args, &wrap_in_bvars(&1, l_bvars))
-    r_wrapped = Enum.map(r_args, &wrap_in_bvars(&1, r_bvars))
-
-    Enum.zip(l_wrapped, r_wrapped)
   end
 
   defp wrap_in_bvars(term_id, []), do: term_id
@@ -321,7 +324,8 @@ defmodule ShotUn do
     left_slot = bound_slot(left_term, left_head)
     right_slot = bound_slot(right_term, right_head)
 
-    not is_nil(left_slot) and left_slot == right_slot
+    left_head.type == right_head.type and
+      not is_nil(left_slot) and left_slot == right_slot
   end
 
   defp bound_slot(%Term{bvars: bvars, max_num: max_num}, %{name: name, type: type}) do
