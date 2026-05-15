@@ -155,7 +155,7 @@ defmodule ShotUnCoverageTest do
       args: [],
       bvars: [],
       type: type,
-      fvars: [],
+      fvars: MapSet.new(),
       max_num: max_num
     })
   end
@@ -170,7 +170,7 @@ defmodule ShotUnCoverageTest do
       args: [arg_id],
       bvars: [],
       type: result_type,
-      fvars: Enum.uniq([head | arg_term.fvars]),
+      fvars: MapSet.put(arg_term.fvars, head),
       max_num: arg_term.max_num
     })
   end

@@ -2,7 +2,7 @@
 
 ```elixir
 Mix.install([
-  {:shot_un, "~> 0.1"}
+  {:shot_un, path: Path.expand("..", __DIR__)}
 ])
 ```
 
@@ -78,9 +78,9 @@ unify({x_times_y, num(4)})
 
 The algorithm finds three solutions to the problem:
 
-- substituting $Y$ by the Church encoding of $4$ and $X$ by the encoding of $1$
-- substituting $Y$ and $X$ by the Church encoding of $2$
-- substituting $Y$ by the Church encoding of $1$ and $X$ by the encoding of $4$
+* substituting $Y$ by the Church encoding of $4$ and $X$ by the encoding of $1$
+* substituting $Y$ and $X$ by the Church encoding of $2$
+* substituting $Y$ by the Church encoding of $1$ and $X$ by the encoding of $4$
 
 ## Example: X a a =? f a a
 
@@ -95,15 +95,15 @@ unify({app(x, [a, a]), app(f, [a, a])})
 
 The algorithm finds nine total solutions which correspond to all combinations of projections and imitations:
 
-- $\lambda\lambda.~f~a~a~/~X$
-- $\lambda\lambda.~f~a~2~/~X$
-- $\lambda\lambda.~f~a~1~/~X$
-- $\lambda\lambda.~f~2~a~/~X$
-- $\lambda\lambda.~f~2~2~/~X$
-- $\lambda\lambda.~f~2~1~/~X$
-- $\lambda\lambda.~f~1~a~/~X$
-- $\lambda\lambda.~f~1~2~/~X$
-- $\lambda\lambda.~f~1~1~/~X$
+* $\lambda\lambda.~f~a~a~/~X$
+* $\lambda\lambda.~f~a~2~/~X$
+* $\lambda\lambda.~f~a~1~/~X$
+* $\lambda\lambda.~f~2~a~/~X$
+* $\lambda\lambda.~f~2~2~/~X$
+* $\lambda\lambda.~f~2~1~/~X$
+* $\lambda\lambda.~f~1~a~/~X$
+* $\lambda\lambda.~f~1~2~/~X$
+* $\lambda\lambda.~f~1~1~/~X$
 
 ## Example: X (f a) =? f (X a)
 
@@ -141,8 +141,8 @@ unify(eqs, 50)
 
 The algorithm finds two solutions for the given problem with depth `50`:
 
-- substituting $Z$ by the Church encoding of $1$, $Y$ by the encoding of $5$ and $X$ by the encoding of $4$
-- substituting $Z$ by the Church encoding of $1$, $Y$ by the encoding of $4$ and $X$ by the encoding of $5$
+* substituting $Z$ by the Church encoding of $1$, $Y$ by the encoding of $5$ and $X$ by the encoding of $4$
+* substituting $Z$ by the Church encoding of $1$, $Y$ by the encoding of $4$ and $X$ by the encoding of $5$
 
 Note that in this case, increasing the depth limit does not yield more solutions even though some unification branches are incomplete.
 
