@@ -1,13 +1,37 @@
 defmodule ShotUn do
   @moduledoc """
-  Implements (syntactic) higher-order pre-unification for term pairs based on
-  projection and imitation.
+  Higher-order unification for the data structures and semantics of
+  [ShotDs](https://hexdocs.pm/shot_ds/readme.html).
+
+  Three algorithms are available:
+
+    * `unify/3` (default) — depth-bounded *pre-unification* (Huet 1975):
+      handles arbitrary higher-order problems but is a semi-decision
+      procedure; flex-flex pairs are returned as constraints.
+    * `pattern_unify/1` — *Miller pattern unification* (Miller 1991): a
+      decidable, unitary fragment in which every flex variable is applied
+      only to distinct bound variables. Returns at most one MGU.
+    * `match/2` — *Huet second-order matching*: the right-hand side is
+      ground, every variable in the problem has type of order ≤ 2.
+      Returns the complete (lazy) stream of matchers without a depth
+      bound.
+
+  `unify/3` accepts a `:strategy` option (`:pre_unification`, `:auto`,
+  `:pattern`, `:matching`). With `:auto`, the problem is inspected and
+  routed to the most specific decidable algorithm it falls into:
+
+    * if every pair is a pattern → `pattern_unify/1`,
+    * otherwise if it satisfies the matching precondition → `match/2`,
+    * otherwise pre-unification.
+
+  See `ShotUn.Pattern`, `ShotUn.Matching` and `ShotUn.Fragment` for
+  details on the individual algorithms and the fragment classifiers.
   """
-  alias ShotDs.Data.{Type, Term, Substitution}
+
+  alias ShotDs.Data.{Substitution, Term}
   alias ShotDs.Stt.TermFactory, as: TF
   alias ShotDs.Stt.Semantics
-  alias ShotUn.UnifSolution
-  alias ShotUn.Bindings
+  alias ShotUn.{Bindings, Fragment, Internal, Matching, Pattern, UnifSolution}
 
   @typep term_pair :: {Term.term_id(), Term.term_id()}
   @typep search_state :: %{
@@ -22,15 +46,83 @@ defmodule ShotUn do
            | {:branch, [search_state()]}
            | {:next, search_state()}
 
-  @doc """
-  Implements depth-bounded higher-order pre-unification to solve a unification
-  problem consisting of a single term pair or a list of term pairs. Returns a
-  lazy stream of unification solutions.
-  """
-  @spec unify([term_pair()] | term_pair(), non_neg_integer()) :: Enumerable.t(UnifSolution.t())
-  def unify(term_pairs, depth \\ 10)
+  @type strategy :: :pre_unification | :auto | :pattern | :matching
 
-  def unify(term_pairs, depth) when is_list(term_pairs) do
+  @doc """
+  Solves a higher-order unification problem.
+
+  Accepts a single term pair `{l, r}` or a list of pairs. `depth` is
+  the search-depth budget for the pre-unification fragment; it is
+  ignored by the matching and pattern strategies. `opts` accepts:
+
+    * `:strategy` — one of `:pre_unification` (default), `:auto`,
+      `:pattern`, `:matching`. See module docs for dispatch rules.
+
+  Returns a lazy `Stream` of `ShotUn.UnifSolution` structs. The
+  `:pattern` strategy yields zero or one solution; the other strategies
+  may yield more (or none).
+  """
+  @spec unify([term_pair()] | term_pair(), non_neg_integer(), keyword()) ::
+          Enumerable.t(UnifSolution.t())
+  def unify(term_pairs, depth \\ 10, opts \\ [])
+
+  def unify({t1, t2} = pair, depth, opts) when is_integer(t1) and is_integer(t2),
+    do: unify([pair], depth, opts)
+
+  def unify(term_pairs, depth, opts) when is_list(term_pairs) do
+    case Keyword.get(opts, :strategy, :pre_unification) do
+      :pre_unification -> pre_unification(term_pairs, depth)
+      :pattern -> pattern_stream(term_pairs)
+      :matching -> Matching.match(term_pairs)
+      :auto -> dispatch_auto(term_pairs, depth)
+      other -> raise ArgumentError, "unknown strategy: #{inspect(other)}"
+    end
+  end
+
+  @doc """
+  Returns the (lazy) stream of all matchers σ such that σ(s) ≡_βη t for
+  each pair `{s, t}`. Equivalent to `ShotUn.Matching.match/1`.
+  """
+  @spec match([term_pair()] | term_pair()) :: Enumerable.t(UnifSolution.t())
+  defdelegate match(pairs), to: Matching
+
+  @doc """
+  Returns `{:ok, %UnifSolution{}}` (or `:error`) for a problem in
+  Miller's pattern fragment. Equivalent to `ShotUn.Pattern.unify/1`.
+  """
+  @spec pattern_unify([term_pair()] | term_pair()) :: {:ok, UnifSolution.t()} | :error
+  defdelegate pattern_unify(pairs), to: Pattern, as: :unify
+
+  ##############################################################################
+  # STRATEGY DISPATCH
+  ##############################################################################
+
+  defp dispatch_auto(pairs, depth) do
+    cond do
+      Fragment.pattern_problem?(pairs) -> pattern_stream(pairs)
+      Fragment.matching_problem?(pairs) -> Matching.match(pairs)
+      true -> pre_unification(pairs, depth)
+    end
+  end
+
+  defp pattern_stream(pairs) do
+    Stream.unfold(:start, fn
+      :start ->
+        case Pattern.unify(pairs) do
+          {:ok, sol} -> {sol, :done}
+          :error -> nil
+        end
+
+      :done ->
+        nil
+    end)
+  end
+
+  ##############################################################################
+  # PRE-UNIFICATION (existing engine)
+  ##############################################################################
+
+  defp pre_unification(term_pairs, depth) do
     Stream.resource(
       fn ->
         TF.start_scratchpad()
@@ -66,9 +158,6 @@ defmodule ShotUn do
       end
     )
   end
-
-  def unify({t1, t2} = pair, depth) when is_integer(t1) and is_integer(t2),
-    do: unify([pair], depth)
 
   defp clean_solution(%{substitutions: substs, flex_pairs: flex}, initial_scope) do
     normalized_substs =
@@ -153,7 +242,7 @@ defmodule ShotUn do
          state,
          rest
        ) do
-    case decompose(left, right) do
+    case Internal.decompose(left, right) do
       {:ok, new_pairs} -> {:next, %{state | pairs: new_pairs ++ rest}}
       :error -> :fail
     end
@@ -166,8 +255,8 @@ defmodule ShotUn do
          state,
          rest
        ) do
-    if same_bound_slot?(left, left_head, right, right_head) do
-      case decompose(left, right) do
+    if Internal.same_bound_slot?(left, left_head, right, right_head) do
+      case Internal.decompose(left, right) do
         {:ok, new_pairs} -> {:next, %{state | pairs: new_pairs ++ rest}}
         :error -> :fail
       end
@@ -273,33 +362,6 @@ defmodule ShotUn do
     end
   end
 
-  defp decompose(%Term{bvars: l_bvars, args: l_args}, %Term{bvars: r_bvars, args: r_args}) do
-    if length(l_args) != length(r_args) do
-      :error
-    else
-      l_wrapped = Enum.map(l_args, &wrap_in_bvars(&1, l_bvars))
-      r_wrapped = Enum.map(r_args, &wrap_in_bvars(&1, r_bvars))
-      {:ok, Enum.zip(l_wrapped, r_wrapped)}
-    end
-  end
-
-  defp wrap_in_bvars(term_id, []), do: term_id
-
-  defp wrap_in_bvars(term_id, new_bvars) do
-    %Term{type: original_type} = term = TF.get_term!(term_id)
-
-    combined_bvars = new_bvars ++ term.bvars
-
-    bvar_maxes = Enum.map(combined_bvars, & &1.name)
-    new_max_num = Enum.max([term.max_num | bvar_maxes], fn -> 0 end)
-
-    new_bvar_types = Enum.map(new_bvars, & &1.type)
-    new_type = Type.new(original_type, new_bvar_types)
-
-    wrapped_term = %Term{term | bvars: combined_bvars, type: new_type, max_num: new_max_num}
-    TF.memoize(wrapped_term)
-  end
-
   # Generates imitation/projection/prim-subst branches and returns them as a
   # list of new states
   defp do_bindings(binding_types, state, rest_pairs) do
@@ -318,34 +380,5 @@ defmodule ShotUn do
       end)
 
     {:branch, new_branches}
-  end
-
-  defp same_bound_slot?(left_term, left_head, right_term, right_head) do
-    left_slot = bound_slot(left_term, left_head)
-    right_slot = bound_slot(right_term, right_head)
-
-    left_head.type == right_head.type and
-      not is_nil(left_slot) and left_slot == right_slot
-  end
-
-  defp bound_slot(%Term{bvars: bvars, max_num: max_num}, %{name: name, type: type}) do
-    exact_index =
-      Enum.find_index(bvars, fn bv ->
-        bv.name == name and bv.type == type
-      end)
-
-    if exact_index do
-      exact_index
-    else
-      matching_by_type =
-        bvars
-        |> Enum.with_index()
-        |> Enum.filter(fn {bv, _idx} -> bv.type == type end)
-
-      case matching_by_type do
-        [{_bv, idx}] -> idx
-        _ -> max_num - name
-      end
-    end
   end
 end

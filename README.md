@@ -65,6 +65,41 @@ arguments, we must supply it with fresh variables. The algorithm will branch and
 attempt projection for every argument $s_i$ whose return type matches the goal
 type.
 
+### Decidable Fragments
+
+Two well-known fragments of higher-order unification are decidable and are
+implemented as separate entry points:
+
+- **Miller pattern unification**
+  [(Miller, 1991)](https://doi.org/10.1093/logcom/1.4.497): the subclass in
+  which every free variable appears only in applications to pairwise distinct
+  bound variables. Unification is _unitary_ — every solvable problem has a
+  most-general unifier (MGU). Exposed via `ShotUn.pattern_unify/1`, which
+  returns `{:ok, %UnifSolution{}}` (with no remaining flex-flex pairs) or
+  `:error`. The implementation follows the four standard rules
+  (decomposition, flex-rigid inversion with pruning of nested flex
+  applications, flex-flex with shared head, flex-flex with distinct heads).
+- **Second-order matching**
+  [(Huet & Lang, 1978)](https://doi.org/10.1007/BF00264598): the special
+  case where the right-hand side is ground and every type in the problem has
+  order at most 2. The complete set of matchers is enumerated lazily without
+  a depth bound; termination follows from a strict structural recursion on
+  the right-hand sides. Exposed via `ShotUn.match/1`.
+
+`ShotUn.unify/3` accepts a `:strategy` option to dispatch among the three
+algorithms. The default is `:pre_unification`; `:auto` inspects the problem
+and routes it to the most specific fragment it falls into:
+
+```elixir
+ShotUn.unify(pairs)                                  # depth-bounded pre-unification
+ShotUn.unify(pairs, 10, strategy: :auto)             # auto-dispatch
+ShotUn.unify(pairs, 10, strategy: :pattern)          # force Miller patterns
+ShotUn.unify(pairs, 10, strategy: :matching)         # force second-order matching
+
+ShotUn.pattern_unify(pairs)                          # direct pattern API
+ShotUn.match({pattern, target})                      # direct matching API (one pair or a list)
+```
+
 ## Installation
 
 The package can be installed by adding `shot_un` to your list of dependencies in

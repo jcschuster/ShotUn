@@ -1,7 +1,7 @@
 defmodule ShotUn.MixProject do
   use Mix.Project
 
-  @version "0.1.4"
+  @version "0.1.5"
   @source_url "https://github.com/jcschuster/ShotUn"
 
   def project do
@@ -12,7 +12,7 @@ defmodule ShotUn.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       source_url: @source_url,
-      description: "Implements an algorithm for higher-order pre-unification.",
+      description: "Higher-order pre-unification, Miller pattern unification, and second-order matching for ShotDs terms.",
       docs: docs(),
       package: package()
     ]
