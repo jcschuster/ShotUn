@@ -44,7 +44,14 @@ defmodule ShotUn.Internal do
     new_bvar_types = Enum.map(new_bvars, & &1.type)
     new_type = Type.new(original_type, new_bvar_types)
 
-    wrapped_term = %Term{term | bvars: combined_bvars, type: new_type, max_num: new_max_num}
+    new_bvar_tvars =
+      Enum.reduce(new_bvars, MapSet.new(), fn bv, acc ->
+        MapSet.union(acc, Type.free_type_vars(bv.type))
+      end)
+
+    new_tvars = MapSet.union(term.tvars, new_bvar_tvars)
+
+    wrapped_term = %Term{term | bvars: combined_bvars, type: new_type, max_num: new_max_num, tvars: new_tvars}
     TF.memoize(wrapped_term)
   end
 

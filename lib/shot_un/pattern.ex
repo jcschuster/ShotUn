@@ -685,11 +685,13 @@ defmodule ShotUn.Pattern do
       new_type = Type.new(body.type, Enum.map(bvar_decls, & &1.type))
       bvar_maxes = Enum.map(combined_bvars, & &1.name)
       new_max = Enum.max([body.max_num | bvar_maxes], fn -> 0 end)
+      new_tvars = collect_tvars(body.head, body.args, combined_bvars)
 
       new_term = %Term{
         body
         | bvars: combined_bvars,
           type: new_type,
+          tvars: new_tvars,
           max_num: new_max
       }
 
