@@ -26,14 +26,15 @@ defmodule ShotUn.Pattern do
   Termination is by structural recursion on the work-list; no depth
   bound is needed.
 
-  Use `ShotUn.pattern_unify/1` as the public entry point. Inputs
-  containing non-pattern terms raise `ArgumentError`.
+  Use `ShotUn.pattern_unify/2` as the public entry point. Inputs
+  containing non-pattern terms raise `ArgumentError`. Pass `vis: true`
+  in `opts` to receive a `{result, %ShotUn.Trace{}}` tuple.
   """
 
   alias ShotDs.Data.{Declaration, Substitution, Term, Type}
   alias ShotDs.Stt.TermFactory, as: TF
   alias ShotDs.Stt.Semantics
-  alias ShotUn.{Fragment, Internal, UnifSolution}
+  alias ShotUn.{Fragment, Internal, Tracer, UnifSolution}
 
   @typep term_pair :: {Term.term_id(), Term.term_id()}
 
@@ -41,15 +42,41 @@ defmodule ShotUn.Pattern do
   Returns `{:ok, %UnifSolution{}}` (whose `flex_pairs` are always empty)
   when an MGU exists, otherwise `:error`. Raises `ArgumentError` when
   the input is not a higher-order pattern.
+
+  `opts`:
+
+    * `:vis` — when `true`, returns `{result, %ShotUn.Trace{}}` instead
+      of `result`. Defaults to `false`.
   """
-  @spec unify([term_pair()] | term_pair()) :: {:ok, UnifSolution.t()} | :error
-  def unify(pair_or_pairs)
+  @spec unify([term_pair()] | term_pair(), keyword()) ::
+          {:ok, UnifSolution.t()}
+          | :error
+          | {{:ok, UnifSolution.t()} | :error, ShotUn.Trace.t()}
+  def unify(pair_or_pairs, opts \\ [])
 
-  def unify({l, r}) when is_integer(l) and is_integer(r), do: unify([{l, r}])
+  def unify({l, r}, opts) when is_integer(l) and is_integer(r), do: unify([{l, r}], opts)
 
-  def unify(pairs) when is_list(pairs) do
+  def unify(pairs, opts) when is_list(pairs) do
     validate!(pairs)
 
+    vis? = Keyword.get(opts, :vis, false)
+    if vis?, do: Tracer.start()
+
+    try do
+      result = run_unify(pairs)
+
+      if vis? do
+        trace = :pattern |> Tracer.collect() |> ShotUn.Trace.prune_to_solutions()
+        {result, trace}
+      else
+        result
+      end
+    after
+      if vis?, do: Tracer.stop()
+    end
+  end
+
+  defp run_unify(pairs) do
     my_scratchpad? = is_nil(Process.get(:term_scratchpad))
     if my_scratchpad?, do: TF.start_scratchpad()
 
@@ -61,7 +88,9 @@ defmodule ShotUn.Pattern do
             into: MapSet.new(),
             do: fvar
 
-      case run(pairs, []) do
+      root_id = Tracer.record(nil, build_root_attrs(pairs))
+
+      case run(pairs, [], root_id) do
         {:ok, substs} ->
           cleaned = clean(substs, scope)
           committed = if my_scratchpad?, do: commit(cleaned), else: cleaned
@@ -90,47 +119,79 @@ defmodule ShotUn.Pattern do
   # WORK-LIST LOOP
   ##############################################################################
 
-  @spec run([term_pair()], [Substitution.t()]) :: {:ok, [Substitution.t()]} | :error
-  defp run([], substs), do: {:ok, substs}
+  @spec run([term_pair()], [Substitution.t()], non_neg_integer() | nil) ::
+          {:ok, [Substitution.t()]} | :error
+  defp run([], substs, parent_id) do
+    _ = Tracer.record(parent_id, build_solved_attrs(substs))
+    {:ok, substs}
+  end
 
-  defp run([{l, r} | rest], substs) when l == r, do: run(rest, substs)
+  defp run([{l, r} | rest], substs, parent_id) when l == r do
+    new_id = Tracer.record(parent_id, build_trivial_attrs(rest, substs, l))
+    run(rest, substs, new_id)
+  end
 
-  defp run([{l_id, r_id} | rest], substs) do
+  defp run([{l_id, r_id} | rest], substs, parent_id) do
     left = TF.get_term!(l_id)
     right = TF.get_term!(r_id)
 
     if left.type != right.type do
+      _ =
+        Tracer.record_fail(
+          parent_id,
+          :type_mismatch,
+          "#{inspect(left.type)} vs #{inspect(right.type)}"
+        )
+
       :error
     else
-      dispatch(left, right, l_id, r_id, rest, substs)
+      dispatch(left, right, l_id, r_id, rest, substs, parent_id)
     end
   rescue
-    # Defensive: if validate! missed something and we hit an unexpected shape,
-    # fail rather than crash the caller.
-    _ -> :error
+    _ -> record_fail_and_error(parent_id, :dead_end)
   end
 
-  defp dispatch(left, right, l_id, r_id, rest, substs) do
+  defp build_solved_attrs(substs) do
+    fn ->
+      %{kind: :solution, rule: :solved, substs: Tracer.format_substs(substs), flex: []}
+    end
+  end
+
+  defp build_trivial_attrs(rest, substs, l) do
+    fn ->
+      %{
+        kind: :step,
+        rule: :trivial,
+        pairs: Tracer.format_pairs(rest),
+        substs: Tracer.format_substs(substs),
+        flex: [],
+        note: Tracer.format_term(l)
+      }
+    end
+  end
+
+  defp dispatch(left, right, l_id, r_id, rest, substs, parent_id) do
     case {left.head.kind, right.head.kind} do
       {l_kind, r_kind} when l_kind in [:co, :bv] and r_kind in [:co, :bv] ->
-        decompose_rigid(left, right, rest, substs)
+        decompose_rigid(left, right, rest, substs, parent_id)
 
       {:fv, :fv} ->
         if left.head == right.head do
-          alias_rule(left, right, rest, substs)
+          alias_rule(left, right, rest, substs, parent_id)
         else
-          intersection_rule(left, right, rest, substs)
+          intersection_rule(left, right, rest, substs, parent_id)
         end
 
       {:fv, _} ->
-        invert_pair(left, right, rest, substs)
+        invert_pair(left, right, rest, substs, parent_id)
 
       {_, :fv} ->
-        # Swap so the flex is on the left.
-        run([{r_id, l_id} | rest], substs)
+        # Swap so the flex is on the left. The swap itself is bookkeeping;
+        # the resulting rule (invert/alias/intersection) records the node.
+        run([{r_id, l_id} | rest], substs, parent_id)
 
       _ ->
-        :error
+        record_fail_and_error(parent_id, :dead_end)
     end
   end
 
@@ -138,24 +199,42 @@ defmodule ShotUn.Pattern do
   # RIGID-RIGID DECOMPOSITION
   ##############################################################################
 
-  defp decompose_rigid(%Term{head: lh} = left, %Term{head: rh} = right, rest, substs) do
+  defp decompose_rigid(%Term{head: lh} = left, %Term{head: rh} = right, rest, substs, parent_id) do
     cond do
       lh.kind == :co and rh.kind == :co and lh == rh ->
-        do_decompose(left, right, rest, substs)
+        do_decompose(left, right, rest, substs, :decompose_const, to_string(lh.name), parent_id)
 
       lh.kind == :bv and rh.kind == :bv and
           Internal.same_bound_slot?(left, lh, right, rh) ->
-        do_decompose(left, right, rest, substs)
+        do_decompose(left, right, rest, substs, :decompose_bv, nil, parent_id)
 
       true ->
-        :error
+        record_fail_and_error(parent_id, :rigid_clash)
     end
   end
 
-  defp do_decompose(left, right, rest, substs) do
+  defp do_decompose(left, right, rest, substs, rule, note, parent_id) do
     case Internal.decompose(left, right) do
-      {:ok, new_pairs} -> run(new_pairs ++ rest, substs)
-      :error -> :error
+      {:ok, new_pairs} ->
+        next_pairs = new_pairs ++ rest
+        new_id = Tracer.record(parent_id, build_decompose_attrs(rule, next_pairs, substs, note))
+        run(next_pairs, substs, new_id)
+
+      :error ->
+        record_fail_and_error(parent_id, :no_decompose)
+    end
+  end
+
+  defp build_decompose_attrs(rule, next_pairs, substs, note) do
+    fn ->
+      %{
+        kind: :step,
+        rule: rule,
+        pairs: Tracer.format_pairs(next_pairs),
+        substs: Tracer.format_substs(substs),
+        flex: [],
+        note: note
+      }
     end
   end
 
@@ -163,12 +242,7 @@ defmodule ShotUn.Pattern do
   # FLEX-RIGID INVERSION (with pruning)
   ##############################################################################
 
-  defp invert_pair(%Term{head: f_head} = flex_term, rigid_term, rest, substs) do
-    # F's arguments must be primitive distinct bvars; we extract their indices
-    # relative to F's surrounding context (F's own wrapper lambdas plus any
-    # free outer bvars). The wrapper lambdas of both sides match (otherwise the
-    # types could not agree), so we treat them as F's context and invert only
-    # the *body* of the rigid term.
+  defp invert_pair(%Term{head: f_head} = flex_term, rigid_term, rest, substs, parent_id) do
     case extract_arg_indices(flex_term) do
       {:ok, arg_indices} ->
         n = length(arg_indices)
@@ -177,16 +251,34 @@ defmodule ShotUn.Pattern do
         case invert_root(rigid_term, index_to_pos, n, f_head) do
           {:ok, body_id, prunings} ->
             sigma_f = build_sigma(f_head, body_id, arg_indices)
-            new_substs = [sigma_f | prunings]
-            apply_and_continue(new_substs, rest, substs)
+            apply_and_continue([sigma_f | prunings], rest, substs, :invert, fmt_subst(sigma_f), parent_id)
 
-          {:error, _} ->
-            :error
+          {:error, :occurs} -> record_fail_and_error(parent_id, :occurs)
+          {:error, _} -> record_fail_and_error(parent_id, :invert_fail)
         end
 
       {:error, _} ->
-        :error
+        record_fail_and_error(parent_id, :not_pattern)
     end
+  end
+
+  defp fmt_subst(sigma), do: fn -> Tracer.format_subst(sigma) end
+
+  defp build_root_attrs(pairs) do
+    fn ->
+      %{
+        kind: :start,
+        rule: :init,
+        pairs: Tracer.format_pairs(pairs),
+        substs: [],
+        flex: []
+      }
+    end
+  end
+
+  defp record_fail_and_error(parent_id, rule) do
+    _ = Tracer.record_fail(parent_id, rule)
+    :error
   end
 
   # Process the rigid term as σ(F)'s body: head and args are at "F's context
@@ -497,32 +589,35 @@ defmodule ShotUn.Pattern do
   # FLEX-FLEX SAME HEAD (alias rule)
   ##############################################################################
 
-  defp alias_rule(%Term{head: head, args: l_args, bvars: l_bvars}, %Term{args: r_args, bvars: r_bvars}, rest, substs) do
+  defp alias_rule(%Term{head: head, args: l_args, bvars: l_bvars}, %Term{args: r_args, bvars: r_bvars}, rest, substs, parent_id) do
     # F(x_1, …, x_n) =? F(y_1, …, y_n). Wrap both arg lists in their
     # respective outer-bvar contexts so we get consistent outer indices.
     l_indices = Enum.map(l_args, &Fragment.outer_bvar_index/1)
     r_indices = Enum.map(r_args, &Fragment.outer_bvar_index/1)
 
-    if Enum.any?(l_indices ++ r_indices, &(&1 == :not_bvar)) or
-         length(l_indices) != length(r_indices) or
-         l_bvars != r_bvars do
-      :error
-    else
-      common_positions =
-        Enum.zip(l_indices, r_indices)
-        |> Enum.with_index(1)
-        |> Enum.filter(fn {{a, b}, _pos} -> a == b end)
-        |> Enum.map(fn {_, pos} -> pos end)
+    cond do
+      Enum.any?(l_indices ++ r_indices, &(&1 == :not_bvar)) ->
+        record_fail_and_error(parent_id, :not_pattern)
 
-      %Declaration{type: %Type{goal: f_goal, args: f_arg_types}} = head
+      length(l_indices) != length(r_indices) or l_bvars != r_bvars ->
+        record_fail_and_error(parent_id, :rigid_clash)
 
-      kept_types = Enum.map(common_positions, &Enum.at(f_arg_types, &1 - 1))
-      f_prime_head = Declaration.fresh_var(Type.new(f_goal, kept_types))
+      true ->
+        common_positions =
+          Enum.zip(l_indices, r_indices)
+          |> Enum.with_index(1)
+          |> Enum.filter(fn {{a, b}, _pos} -> a == b end)
+          |> Enum.map(fn {_, pos} -> pos end)
 
-      body = build_pruning_body(f_prime_head, f_arg_types, common_positions)
-      sigma = Substitution.new(head, body)
+        %Declaration{type: %Type{goal: f_goal, args: f_arg_types}} = head
 
-      apply_and_continue([sigma], rest, substs)
+        kept_types = Enum.map(common_positions, &Enum.at(f_arg_types, &1 - 1))
+        f_prime_head = Declaration.fresh_var(Type.new(f_goal, kept_types))
+
+        body = build_pruning_body(f_prime_head, f_arg_types, common_positions)
+        sigma = Substitution.new(head, body)
+
+        apply_and_continue([sigma], rest, substs, :alias, fmt_subst(sigma), parent_id)
     end
   end
 
@@ -531,39 +626,47 @@ defmodule ShotUn.Pattern do
   ##############################################################################
 
   defp intersection_rule(%Term{head: f_head, args: l_args} = l_term,
-                         %Term{head: g_head, args: r_args} = r_term, rest, substs) do
+                         %Term{head: g_head, args: r_args} = r_term, rest, substs, parent_id) do
     l_indices = Enum.map(l_args, &Fragment.outer_bvar_index/1)
     r_indices = Enum.map(r_args, &Fragment.outer_bvar_index/1)
 
-    if Enum.any?(l_indices ++ r_indices, &(&1 == :not_bvar)) or
-         l_term.bvars != r_term.bvars do
-      :error
-    else
-      common_indices = Enum.uniq(Enum.filter(l_indices, &(&1 in r_indices)))
+    cond do
+      Enum.any?(l_indices ++ r_indices, &(&1 == :not_bvar)) ->
+        record_fail_and_error(parent_id, :not_pattern)
 
-      l_keep_pos =
-        common_indices
-        |> Enum.map(fn idx -> Enum.find_index(l_indices, &(&1 == idx)) + 1 end)
+      l_term.bvars != r_term.bvars ->
+        record_fail_and_error(parent_id, :rigid_clash)
 
-      r_keep_pos =
-        common_indices
-        |> Enum.map(fn idx -> Enum.find_index(r_indices, &(&1 == idx)) + 1 end)
+      true ->
+        common_indices = Enum.uniq(Enum.filter(l_indices, &(&1 in r_indices)))
 
-      %Declaration{type: %Type{goal: goal, args: l_arg_types}} = f_head
-      %Declaration{type: %Type{args: r_arg_types}} = g_head
+        l_keep_pos =
+          common_indices
+          |> Enum.map(fn idx -> Enum.find_index(l_indices, &(&1 == idx)) + 1 end)
 
-      h_arg_types = Enum.map(l_keep_pos, &Enum.at(l_arg_types, &1 - 1))
-      h_head = Declaration.fresh_var(Type.new(goal, h_arg_types))
+        r_keep_pos =
+          common_indices
+          |> Enum.map(fn idx -> Enum.find_index(r_indices, &(&1 == idx)) + 1 end)
 
-      sigma_f =
-        Substitution.new(f_head, build_pruning_body(h_head, l_arg_types, l_keep_pos))
+        %Declaration{type: %Type{goal: goal, args: l_arg_types}} = f_head
+        %Declaration{type: %Type{args: r_arg_types}} = g_head
 
-      # For σ(G) the body is λv_1…v_m. H(v_{q_1}, …, v_{q_k}); we reuse the same
-      # builder but with the right-side arg types and positions.
-      sigma_g_body = build_pruning_body(h_head, r_arg_types, r_keep_pos)
-      sigma_g = Substitution.new(g_head, sigma_g_body)
+        h_arg_types = Enum.map(l_keep_pos, &Enum.at(l_arg_types, &1 - 1))
+        h_head = Declaration.fresh_var(Type.new(goal, h_arg_types))
 
-      apply_and_continue([sigma_f, sigma_g], rest, substs)
+        sigma_f =
+          Substitution.new(f_head, build_pruning_body(h_head, l_arg_types, l_keep_pos))
+
+        # For σ(G) the body is λv_1…v_m. H(v_{q_1}, …, v_{q_k}); we reuse the same
+        # builder but with the right-side arg types and positions.
+        sigma_g_body = build_pruning_body(h_head, r_arg_types, r_keep_pos)
+        sigma_g = Substitution.new(g_head, sigma_g_body)
+
+        note_fn = fn ->
+          Tracer.format_subst(sigma_f) <> "; " <> Tracer.format_subst(sigma_g)
+        end
+
+        apply_and_continue([sigma_f, sigma_g], rest, substs, :intersection, note_fn, parent_id)
     end
   end
 
@@ -571,19 +674,36 @@ defmodule ShotUn.Pattern do
   # SUBSTITUTION APPLICATION & ACCUMULATION
   ##############################################################################
 
-  defp apply_and_continue(new_substs, rest, substs) do
+  defp apply_and_continue(new_substs, rest, substs, rule, note_fn, parent_id) do
     {final_rest, final_substs} =
-      Enum.reduce(new_substs, {rest, substs}, fn sigma, {acc_rest, acc_substs} ->
-        new_rest =
-          Enum.map(acc_rest, fn {l, r} ->
-            {Semantics.subst!(sigma, l), Semantics.subst!(sigma, r)}
-          end)
+      Enum.reduce(new_substs, {rest, substs}, &apply_one_subst/2)
 
-        new_substs_acc = Semantics.add_subst!(acc_substs, sigma)
-        {new_rest, new_substs_acc}
+    new_id =
+      Tracer.record(parent_id, build_continue_attrs(rule, final_rest, final_substs, note_fn))
+
+    run(final_rest, final_substs, new_id)
+  end
+
+  defp apply_one_subst(sigma, {acc_rest, acc_substs}) do
+    new_rest =
+      Enum.map(acc_rest, fn {l, r} ->
+        {Semantics.subst!(sigma, l), Semantics.subst!(sigma, r)}
       end)
 
-    run(final_rest, final_substs)
+    {new_rest, Semantics.add_subst!(acc_substs, sigma)}
+  end
+
+  defp build_continue_attrs(rule, final_rest, final_substs, note_fn) do
+    fn ->
+      %{
+        kind: :step,
+        rule: rule,
+        pairs: Tracer.format_pairs(final_rest),
+        substs: Tracer.format_substs(final_substs),
+        flex: [],
+        note: note_fn.()
+      }
+    end
   end
 
   ##############################################################################

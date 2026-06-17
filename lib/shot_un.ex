@@ -8,7 +8,7 @@ defmodule ShotUn do
     * `unify/3` (default) — depth-bounded *pre-unification* (Huet 1975):
       handles arbitrary higher-order problems but is a semi-decision
       procedure; flex-flex pairs are returned as constraints.
-    * `pattern_unify/1` — *Miller pattern unification* (Miller 1991): a
+    * `pattern_unify/2` — *Miller pattern unification* (Miller 1991): a
       decidable, unitary fragment in which every flex variable is applied
       only to distinct bound variables. Returns at most one MGU.
     * `match/2` — *Huet second-order matching*: the right-hand side is
@@ -20,25 +20,37 @@ defmodule ShotUn do
   `:pattern`, `:matching`). With `:auto`, the problem is inspected and
   routed to the most specific decidable algorithm it falls into:
 
-    * if every pair is a pattern → `pattern_unify/1`,
+    * if every pair is a pattern → `pattern_unify/2`,
     * otherwise if it satisfies the matching precondition → `match/2`,
     * otherwise pre-unification.
 
   See `ShotUn.Pattern`, `ShotUn.Matching` and `ShotUn.Fragment` for
   details on the individual algorithms and the fragment classifiers.
+
+  ## Visualisation
+
+  Every public entry point accepts a `vis: true` option that wraps the
+  result in a `{result, %ShotUn.Trace{}}` tuple. The trace is a tree of
+  `ShotUn.Trace.Node` records covering only the paths from the initial
+  state to a `:solution` leaf — failed branches and dead-end steps are
+  pruned out before the tuple is returned. Render with
+  `ShotUn.Trace.Mermaid.render/2`. When `vis: true` the search is
+  materialised eagerly (the lazy `Stream` is consumed before the call
+  returns) so that the trace is complete.
   """
 
   alias ShotDs.Data.{Substitution, Term}
   alias ShotDs.Stt.TermFactory, as: TF
   alias ShotDs.Stt.Semantics
-  alias ShotUn.{Bindings, Fragment, Internal, Matching, Pattern, UnifSolution}
+  alias ShotUn.{Bindings, Fragment, Internal, Matching, Pattern, Tracer, UnifSolution}
 
   @typep term_pair :: {Term.term_id(), Term.term_id()}
   @typep search_state :: %{
            pairs: [term_pair()],
-           subst: [Substitution.t()],
+           substs: [Substitution.t()],
            flex: [term_pair()],
-           depth: non_neg_integer()
+           depth: non_neg_integer(),
+           trace_id: non_neg_integer() | nil
          }
   @typep step_t ::
            :fail
@@ -57,53 +69,74 @@ defmodule ShotUn do
 
     * `:strategy` — one of `:pre_unification` (default), `:auto`,
       `:pattern`, `:matching`. See module docs for dispatch rules.
+    * `:vis` — when `true`, returns `{stream, %ShotUn.Trace{}}` instead
+      of a bare stream. Defaults to `false`.
 
-  Returns a lazy `Stream` of `ShotUn.UnifSolution` structs. The
-  `:pattern` strategy yields zero or one solution; the other strategies
-  may yield more (or none).
+  Returns a lazy `Stream` of `ShotUn.UnifSolution` structs, or — under
+  `vis: true` — a `{stream, trace}` tuple in which the stream contains
+  the same solutions but is fully materialised before the call returns.
   """
   @spec unify([term_pair()] | term_pair(), non_neg_integer(), keyword()) ::
           Enumerable.t(UnifSolution.t())
+          | {Enumerable.t(UnifSolution.t()), ShotUn.Trace.t()}
   def unify(term_pairs, depth \\ 10, opts \\ [])
 
   def unify({t1, t2} = pair, depth, opts) when is_integer(t1) and is_integer(t2),
     do: unify([pair], depth, opts)
 
   def unify(term_pairs, depth, opts) when is_list(term_pairs) do
-    case Keyword.get(opts, :strategy, :pre_unification) do
-      :pre_unification -> pre_unification(term_pairs, depth)
-      :pattern -> pattern_stream(term_pairs)
-      :matching -> Matching.match(term_pairs)
-      :auto -> dispatch_auto(term_pairs, depth)
-      other -> raise ArgumentError, "unknown strategy: #{inspect(other)}"
-    end
+    strategy = Keyword.get(opts, :strategy, :pre_unification)
+    vis? = Keyword.get(opts, :vis, false)
+
+    resolved =
+      case strategy do
+        :auto -> resolve_auto(term_pairs)
+        other when other in [:pre_unification, :pattern, :matching] -> other
+        other -> raise ArgumentError, "unknown strategy: #{inspect(other)}"
+      end
+
+    dispatch(resolved, term_pairs, depth, vis?)
   end
 
   @doc """
   Returns the (lazy) stream of all matchers σ such that σ(s) ≡_βη t for
-  each pair `{s, t}`. Equivalent to `ShotUn.Matching.match/1`.
+  each pair `{s, t}`. With `vis: true`, returns `{stream, trace}`.
+  Equivalent to `ShotUn.Matching.match/2`.
   """
-  @spec match([term_pair()] | term_pair()) :: Enumerable.t(UnifSolution.t())
-  defdelegate match(pairs), to: Matching
+  @spec match([term_pair()] | term_pair(), keyword()) ::
+          Enumerable.t(UnifSolution.t())
+          | {Enumerable.t(UnifSolution.t()), ShotUn.Trace.t()}
+  def match(pairs, opts \\ []), do: Matching.match(pairs, opts)
 
   @doc """
   Returns `{:ok, %UnifSolution{}}` (or `:error`) for a problem in
-  Miller's pattern fragment. Equivalent to `ShotUn.Pattern.unify/1`.
+  Miller's pattern fragment. With `vis: true`, returns
+  `{result, trace}`. Equivalent to `ShotUn.Pattern.unify/2`.
   """
-  @spec pattern_unify([term_pair()] | term_pair()) :: {:ok, UnifSolution.t()} | :error
-  defdelegate pattern_unify(pairs), to: Pattern, as: :unify
+  @spec pattern_unify([term_pair()] | term_pair(), keyword()) ::
+          {:ok, UnifSolution.t()}
+          | :error
+          | {{:ok, UnifSolution.t()} | :error, ShotUn.Trace.t()}
+  def pattern_unify(pairs, opts \\ []), do: Pattern.unify(pairs, opts)
 
   ##############################################################################
   # STRATEGY DISPATCH
   ##############################################################################
 
-  defp dispatch_auto(pairs, depth) do
+  defp resolve_auto(pairs) do
     cond do
-      Fragment.pattern_problem?(pairs) -> pattern_stream(pairs)
-      Fragment.matching_problem?(pairs) -> Matching.match(pairs)
-      true -> pre_unification(pairs, depth)
+      Fragment.pattern_problem?(pairs) -> :pattern
+      Fragment.matching_problem?(pairs) -> :matching
+      true -> :pre_unification
     end
   end
+
+  defp dispatch(:pre_unification, pairs, depth, false), do: pre_unification(pairs, depth)
+  defp dispatch(:pre_unification, pairs, depth, true), do: pre_unification_with_vis(pairs, depth)
+  defp dispatch(:pattern, pairs, _depth, false), do: pattern_stream(pairs)
+  defp dispatch(:pattern, pairs, _depth, true), do: pattern_stream_with_vis(pairs)
+  defp dispatch(:matching, pairs, _depth, false), do: Matching.match(pairs)
+  defp dispatch(:matching, pairs, _depth, true), do: Matching.match(pairs, vis: true)
 
   defp pattern_stream(pairs) do
     Stream.unfold(:start, fn
@@ -118,8 +151,32 @@ defmodule ShotUn do
     end)
   end
 
+  defp pattern_stream_with_vis(pairs) do
+    {result, trace} = Pattern.unify(pairs, vis: true)
+
+    solutions =
+      case result do
+        {:ok, sol} -> [sol]
+        :error -> []
+      end
+
+    {Stream.concat([solutions]), trace}
+  end
+
+  defp pre_unification_with_vis(pairs, depth) do
+    Tracer.start()
+
+    try do
+      solutions = pre_unification(pairs, depth) |> Enum.to_list()
+      trace = :pre_unification |> Tracer.collect() |> ShotUn.Trace.prune_to_solutions()
+      {Stream.concat([solutions]), trace}
+    after
+      Tracer.stop()
+    end
+  end
+
   ##############################################################################
-  # PRE-UNIFICATION (existing engine)
+  # PRE-UNIFICATION ENGINE
   ##############################################################################
 
   defp pre_unification(term_pairs, depth) do
@@ -134,7 +191,25 @@ defmodule ShotUn do
               into: MapSet.new(),
               do: fvar
 
-        initial_state = %{pairs: term_pairs, substs: [], flex: [], depth: depth}
+        root_id =
+          Tracer.record(nil, fn ->
+            %{
+              kind: :start,
+              rule: :init,
+              pairs: Tracer.format_pairs(term_pairs),
+              substs: [],
+              flex: [],
+              depth: depth
+            }
+          end)
+
+        initial_state = %{
+          pairs: term_pairs,
+          substs: [],
+          flex: [],
+          depth: depth,
+          trace_id: root_id
+        }
 
         {[initial_state], initial_scope}
       end,
@@ -211,15 +286,41 @@ defmodule ShotUn do
   end
 
   @spec step(search_state()) :: step_t()
-  defp step(%{depth: 0}), do: :fail
+  defp step(%{depth: 0, trace_id: parent}) do
+    _ = Tracer.record_fail(parent, :depth_exhausted)
+    :fail
+  end
 
-  defp step(%{pairs: [], substs: substs, flex: flex}),
-    do: {:solution, %UnifSolution{substitutions: substs, flex_pairs: flex}}
+  defp step(%{pairs: [], substs: substs, flex: flex, trace_id: parent}) do
+    _ =
+      Tracer.record(parent, fn ->
+        %{
+          kind: :solution,
+          rule: :solved,
+          substs: Tracer.format_substs(substs),
+          flex: Tracer.format_pairs(flex)
+        }
+      end)
+
+    {:solution, %UnifSolution{substitutions: substs, flex_pairs: flex}}
+  end
 
   defp step(%{pairs: [{left_id, right_id} | rest]} = state) do
-    # Trivial case
     if left_id == right_id do
-      {:next, %{state | pairs: rest}}
+      new_id =
+        Tracer.record(state.trace_id, fn ->
+          %{
+            kind: :step,
+            rule: :trivial,
+            pairs: Tracer.format_pairs(rest),
+            substs: Tracer.format_substs(state.substs),
+            flex: Tracer.format_pairs(state.flex),
+            depth: state.depth,
+            note: Tracer.format_term(left_id)
+          }
+        end)
+
+      {:next, %{state | pairs: rest, trace_id: new_id}}
     else
       left = TF.get_term!(left_id)
       right = TF.get_term!(right_id)
@@ -228,12 +329,12 @@ defmodule ShotUn do
     end
   end
 
-  @spec evaluate_pair(Term.t(), Term.t(), search_state(), term_pair()) :: step_t()
+  @spec evaluate_pair(Term.t(), Term.t(), search_state(), [term_pair()]) :: step_t()
   defp evaluate_pair(term_1, term_2, state, rest)
 
   # Case: incompatible types (we assume monotypes)
-  defp evaluate_pair(%Term{type: t1}, %Term{type: t2}, _s, _r) when t1 != t2,
-    do: :fail
+  defp evaluate_pair(%Term{type: t1}, %Term{type: t2}, state, _rest) when t1 != t2,
+    do: fail(state, :type_mismatch, "#{inspect(t1)} vs #{inspect(t2)}")
 
   # Case: rigid-rigid (constants)
   defp evaluate_pair(
@@ -243,8 +344,11 @@ defmodule ShotUn do
          rest
        ) do
     case Internal.decompose(left, right) do
-      {:ok, new_pairs} -> {:next, %{state | pairs: new_pairs ++ rest}}
-      :error -> :fail
+      {:ok, new_pairs} ->
+        record_step_next(:decompose_const, new_pairs ++ rest, state, to_string(c.name))
+
+      :error ->
+        fail(state, :no_decompose, "head=#{c.name}")
     end
   end
 
@@ -257,18 +361,33 @@ defmodule ShotUn do
        ) do
     if Internal.same_bound_slot?(left, left_head, right, right_head) do
       case Internal.decompose(left, right) do
-        {:ok, new_pairs} -> {:next, %{state | pairs: new_pairs ++ rest}}
-        :error -> :fail
+        {:ok, new_pairs} -> record_step_next(:decompose_bv, new_pairs ++ rest, state, nil)
+        :error -> fail(state, :no_decompose)
       end
     else
-      :fail
+      fail(state, :rigid_clash, "different bound-variable slots")
     end
   end
 
   # Case: flex-flex
   defp evaluate_pair(%Term{head: %{kind: :fv}}, %Term{head: %{kind: :fv}}, state, rest) do
     [{l_id, r_id} | _] = state.pairs
-    {:next, %{state | pairs: rest, flex: [{l_id, r_id} | state.flex]}}
+    new_flex = [{l_id, r_id} | state.flex]
+
+    new_id =
+      Tracer.record(state.trace_id, fn ->
+        %{
+          kind: :step,
+          rule: :flex_flex,
+          pairs: Tracer.format_pairs(rest),
+          substs: Tracer.format_substs(state.substs),
+          flex: Tracer.format_pairs(new_flex),
+          depth: state.depth,
+          note: "deferred " <> Tracer.format_term(l_id) <> " =? " <> Tracer.format_term(r_id)
+        }
+      end)
+
+    {:next, %{state | pairs: rest, flex: new_flex, trace_id: new_id}}
   end
 
   # Case: bind left
@@ -315,11 +434,28 @@ defmodule ShotUn do
   end
 
   # Rest cases: incompatible rigid heads etc.
-  defp evaluate_pair(_left, _right, _state, _rest), do: :fail
+  defp evaluate_pair(_left, _right, state, _rest), do: fail(state, :rigid_clash)
 
   ##############################################################################
   # FURTHER HELPERS
   ##############################################################################
+
+  defp record_step_next(rule, next_pairs, state, note) do
+    new_id =
+      Tracer.record(state.trace_id, fn ->
+        %{
+          kind: :step,
+          rule: rule,
+          pairs: Tracer.format_pairs(next_pairs),
+          substs: Tracer.format_substs(state.substs),
+          flex: Tracer.format_pairs(state.flex),
+          depth: state.depth,
+          note: note
+        }
+      end)
+
+    {:next, %{state | pairs: next_pairs, trace_id: new_id}}
+  end
 
   defp apply_substitution(new_subst, state, rest_pairs) do
     updated_substs = Semantics.add_subst!(state.substs, new_subst)
@@ -354,16 +490,41 @@ defmodule ShotUn do
 
   defp bind(var, right_term, state, rest_pairs) do
     if var in right_term.fvars do
-      # variable capture
-      :fail
+      fail(state, :occurs, "#{var.name} occurs in target")
     else
       new_subst = Substitution.new(var, right_term.id)
-      {:next, apply_substitution(new_subst, state, rest_pairs)}
+      new_state = apply_substitution(new_subst, state, rest_pairs)
+      new_id = Tracer.record(state.trace_id, build_bind_attrs(new_state, new_subst))
+      {:next, %{new_state | trace_id: new_id}}
     end
   end
 
-  # Generates imitation/projection/prim-subst branches and returns them as a
-  # list of new states
+  defp build_bind_attrs(new_state, new_subst) do
+    fn ->
+      %{
+        kind: :step,
+        rule: :bind,
+        pairs: Tracer.format_pairs(new_state.pairs),
+        substs: Tracer.format_substs(new_state.substs),
+        flex: Tracer.format_pairs(new_state.flex),
+        depth: new_state.depth,
+        note: Tracer.format_subst(new_subst)
+      }
+    end
+  end
+
+  defp fail(state, rule) do
+    _ = Tracer.record_fail(state.trace_id, rule)
+    :fail
+  end
+
+  defp fail(state, rule, note) do
+    _ = Tracer.record_fail(state.trace_id, rule, note)
+    :fail
+  end
+
+  # Generates imitation/projection branches and returns them as a list of new
+  # states, each carrying its own trace_id pointing at the recorded child.
   defp do_bindings(binding_types, state, rest_pairs) do
     [{flex_id, rigid_id} | _] = state.pairs
 
@@ -372,13 +533,48 @@ defmodule ShotUn do
 
     substs = Bindings.generic_binding(flex_head, rigid_head, binding_types)
 
-    new_branches =
-      Enum.map(substs, fn subst ->
-        state
-        |> then(&apply_substitution(subst, &1, [{flex_id, rigid_id} | rest_pairs]))
-        |> Map.update!(:depth, &(&1 - 1))
-      end)
+    case substs do
+      [] ->
+        fail(state, :dead_end, "no #{Enum.join(binding_types, "/")} candidate matches goal type")
 
-    {:branch, new_branches}
+      _ ->
+        new_branches =
+          Enum.map(substs, &build_binding_branch(&1, state, flex_id, rigid_id, rigid_head, rest_pairs))
+
+        {:branch, new_branches}
+    end
+  end
+
+  defp build_binding_branch(subst, state, flex_id, rigid_id, rigid_head, rest_pairs) do
+    branch_state =
+      state
+      |> then(&apply_substitution(subst, &1, [{flex_id, rigid_id} | rest_pairs]))
+      |> Map.update!(:depth, &(&1 - 1))
+
+    new_id =
+      Tracer.record(state.trace_id, build_branch_attrs(branch_state, subst, rigid_head))
+
+    %{branch_state | trace_id: new_id}
+  end
+
+  defp build_branch_attrs(branch_state, subst, rigid_head) do
+    fn ->
+      %{
+        kind: :step,
+        rule: classify_binding(subst, rigid_head),
+        pairs: Tracer.format_pairs(branch_state.pairs),
+        substs: Tracer.format_substs(branch_state.substs),
+        flex: Tracer.format_pairs(branch_state.flex),
+        depth: branch_state.depth,
+        note: Tracer.format_subst(subst)
+      }
+    end
+  end
+
+  defp classify_binding(subst, rigid_head) do
+    case TF.get_term!(subst.term_id) do
+      %Term{head: head} when head == rigid_head -> :imitation
+      _ -> :projection
+    end
   end
 end

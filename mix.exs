@@ -1,18 +1,19 @@
 defmodule ShotUn.MixProject do
   use Mix.Project
 
-  @version "0.1.6"
+  @version "0.1.7"
   @source_url "https://github.com/jcschuster/ShotUn"
 
   def project do
     [
       app: :shot_un,
       version: @version,
-      elixir: "~> 1.19",
+      elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       source_url: @source_url,
-      description: "Higher-order pre-unification, Miller pattern unification, and second-order matching for ShotDs terms.",
+      description:
+        "Higher-order pre-unification, Miller pattern unification, and second-order matching for ShotDs terms.",
       docs: docs(),
       package: package()
     ]

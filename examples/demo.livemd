@@ -2,7 +2,8 @@
 
 ```elixir
 Mix.install([
-  {:shot_un, path: Path.expand("..", __DIR__)}
+  {:shot_un, path: Path.expand("..", __DIR__)},
+  {:kino, "~> 0.19"}
 ])
 ```
 
@@ -158,3 +159,65 @@ unify({x, app(y, c)})
 ```
 
 $X \overset{?}{=} Y~c$ is an example for the _flex-flex_ case. For these cases, often infinite solutions exist. To ensure semi-decidability, unification is deferred and a list of _flex-flex_ pairs is returned as future constraints.
+
+## Visualization: the decision tree of pre-unification
+
+Every public entry point of ShotUn accepts a `vis: true` option. When set, the call returns a `{result, %ShotUn.Trace{}}` tuple instead of a bare result. The trace is a tree of `ShotUn.Trace.Node` records covering only the paths from the initial state to a solution leaf — failed branches and dead-end intermediate steps are pruned out. `ShotUn.Trace.Mermaid.render/2` produces a Mermaid `graph TD` string that we can render inline with `Kino.Mermaid.new/1`.
+
+```elixir
+x = TF.make_free_var_term("X", type_i())
+c = TF.make_const_term("c", type_i())
+
+{stream, trace} = unify({x, c}, 10, vis: true)
+Enum.to_list(stream) |> Enum.map(&Kernel.to_string/1) |> IO.puts
+```
+
+```elixir
+trace |> ShotUn.Trace.Mermaid.render() |> Kino.Mermaid.new()
+```
+
+For the simple $X \overset{?}{=} c$ problem the trace is a linear chain `init -.-> bind -.-> solution`. Dotted arrows mark linear continuations.
+
+## Visualization: branching on imitation and projection
+
+The flex-rigid problem $X~a~a \overset{?}{=} f~a~a$ revisits the nine-solution example. The top-level projections substitute $X$ by $\lambda \lambda.~1$ or $\lambda \lambda.~2$, both collapsing the equation to $a \overset{?}{=} f~a~a$ which is a rigid clash; those branches are pruned. Only the imitation $X \leftarrow \lambda \lambda.~f~H_1~H_2$ survives, and each $H_i$ then branches three ways (imitation through $a$, projection onto either argument), producing the 3 × 3 = 9 solution leaves visible in the diagram. Branching choice points use solid arrows (`==>`); linear continuations use dotted arrows (`-.->`).
+
+<!-- livebook:{"output_size":"full"} -->
+
+```elixir
+x = TF.make_free_var_term("X", type_iii())
+f = TF.make_const_term("f", type_iii())
+a = TF.make_const_term("a", type_i())
+
+{_stream, trace} = unify({app(x, [a, a]), app(f, [a, a])}, 10, vis: true)
+
+trace |> ShotUn.Trace.Mermaid.render() |> Kino.Mermaid.new()
+```
+
+## Visualization: pattern unification and second-order matching
+
+`ShotUn.pattern_unify/2` and `ShotUn.match/2` accept the same `vis: true` option. Pattern unification is a single-path work-list rewrite, so its trace is a linear chain — useful to inspect the inversion, alias and intersection rules in action. Below, the flex-flex pair $X \overset{?}{=} Y$ resolves via the *intersection* rule by binding both $X$ and $Y$ to a fresh meta variable.
+
+```elixir
+x = TF.make_free_var_term("X", type_i())
+y = TF.make_free_var_term("Y", type_i())
+
+{{:ok, sol}, trace} = pattern_unify({x, y}, vis: true)
+IO.puts(Kernel.to_string(sol))
+
+trace |> ShotUn.Trace.Mermaid.render() |> Kino.Mermaid.new()
+```
+
+Second-order matching enumerates all matchers; the trace shows the full set of branches that reached a solution, side by side. The example below — matching $X~a~a$ against the ground target $f~a~a$ — yields the same nine matchers, but here each branch terminates immediately because the target is already ground.
+
+<!-- livebook:{"output_size":"full"} -->
+
+```elixir
+x = TF.make_free_var_term("X", type_iii())
+f = TF.make_const_term("f", type_iii())
+a = TF.make_const_term("a", type_i())
+
+{_stream, trace} = match({app(x, [a, a]), app(f, [a, a])}, vis: true)
+
+trace |> ShotUn.Trace.Mermaid.render() |> Kino.Mermaid.new()
+```
