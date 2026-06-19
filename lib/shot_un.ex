@@ -39,6 +39,7 @@ defmodule ShotUn do
   returns) so that the trace is complete.
   """
 
+  alias ShotDs.Util.Formatter
   alias ShotDs.Data.{Substitution, Term}
   alias ShotDs.Stt.TermFactory, as: TF
   alias ShotDs.Stt.Semantics
@@ -334,7 +335,7 @@ defmodule ShotUn do
 
   # Case: incompatible types (we assume monotypes)
   defp evaluate_pair(%Term{type: t1}, %Term{type: t2}, state, _rest) when t1 != t2,
-    do: fail(state, :type_mismatch, "#{inspect(t1)} vs #{inspect(t2)}")
+    do: fail(state, :type_mismatch, "#{Formatter.format!(t1)} vs #{Formatter.format!(t2)}")
 
   # Case: rigid-rigid (constants)
   defp evaluate_pair(
@@ -345,10 +346,10 @@ defmodule ShotUn do
        ) do
     case Internal.decompose(left, right) do
       {:ok, new_pairs} ->
-        record_step_next(:decompose_const, new_pairs ++ rest, state, inspect(c.name))
+        record_step_next(:decompose_const, new_pairs ++ rest, state, Formatter.format!(c))
 
       :error ->
-        fail(state, :no_decompose, "head=#{c.name}")
+        fail(state, :no_decompose, "head=#{Formatter.format!(c)}")
     end
   end
 
@@ -490,7 +491,7 @@ defmodule ShotUn do
 
   defp bind(var, right_term, state, rest_pairs) do
     if var in right_term.fvars do
-      fail(state, :occurs, "#{var.name} occurs in target")
+      fail(state, :occurs, "#{Formatter.format!(var)} occurs in target")
     else
       new_subst = Substitution.new(var, right_term.id)
       new_state = apply_substitution(new_subst, state, rest_pairs)
